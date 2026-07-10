@@ -166,26 +166,79 @@ void flip_sign_bit(U* u, size_t n) {
     for (size_t i = 0; i < n; ++i) u[i] ^= mask;
 }
 
+// move the last kk = min(k, n) elements to the front; returns kk
+template <class U>
+size_t take_tail(U* data, size_t n, size_t k) {
+    size_t kk = k < n ? k : n;
+    if (kk && kk < n) std::memmove(data, data + (n - kk), kk * sizeof(U));
+    return kk;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------ C ABI
 extern "C" {
 
-SLUICE_API void sluice_sort_u32(uint32_t* data, size_t n) { sluice_core(data, n); }
-SLUICE_API void sluice_sort_u64(uint64_t* data, size_t n) { sluice_core(data, n); }
-
-SLUICE_API void sluice_sort_i32(int32_t* data, size_t n) {
+// Ordered variants: sort ascending with the engine, then reverse in place for
+// descending. Reversal is O(n) and in-place; for scalar integers, reversing a
+// stable ascending sort is exactly the descending order.
+SLUICE_API void sluice_sort_u32_ordered(uint32_t* data, size_t n, sluice_order order) {
+    sluice_core(data, n);
+    if (order == SLUICE_DESCENDING) std::reverse(data, data + n);
+}
+SLUICE_API void sluice_sort_u64_ordered(uint64_t* data, size_t n, sluice_order order) {
+    sluice_core(data, n);
+    if (order == SLUICE_DESCENDING) std::reverse(data, data + n);
+}
+SLUICE_API void sluice_sort_i32_ordered(int32_t* data, size_t n, sluice_order order) {
     uint32_t* u = reinterpret_cast<uint32_t*>(data);
     flip_sign_bit(u, n);
     sluice_core(u, n);
     flip_sign_bit(u, n);
+    if (order == SLUICE_DESCENDING) std::reverse(data, data + n);
 }
-
-SLUICE_API void sluice_sort_i64(int64_t* data, size_t n) {
+SLUICE_API void sluice_sort_i64_ordered(int64_t* data, size_t n, sluice_order order) {
     uint64_t* u = reinterpret_cast<uint64_t*>(data);
     flip_sign_bit(u, n);
     sluice_core(u, n);
     flip_sign_bit(u, n);
+    if (order == SLUICE_DESCENDING) std::reverse(data, data + n);
+}
+
+// Ascending shorthands (original public entry points, unchanged behaviour).
+SLUICE_API void sluice_sort_u32(uint32_t* data, size_t n) { sluice_sort_u32_ordered(data, n, SLUICE_ASCENDING); }
+SLUICE_API void sluice_sort_u64(uint64_t* data, size_t n) { sluice_sort_u64_ordered(data, n, SLUICE_ASCENDING); }
+SLUICE_API void sluice_sort_i32(int32_t*  data, size_t n) { sluice_sort_i32_ordered(data, n, SLUICE_ASCENDING); }
+SLUICE_API void sluice_sort_i64(int64_t*  data, size_t n) { sluice_sort_i64_ordered(data, n, SLUICE_ASCENDING); }
+
+// first_n / top_n: head and tail of the array sorted in `order`.
+//   first_n -> sort, keep the first k (head; already at the front)
+//   top_n   -> sort, keep the last k (tail), moved to the front
+// Both return the count kept (min(k, n)). With SLUICE_ASCENDING first_n is the
+// k smallest and top_n the k largest; SLUICE_DESCENDING flips both.
+SLUICE_API size_t sluice_first_n_u32(uint32_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_u32_ordered(data, n, order); return k < n ? k : n;
+}
+SLUICE_API size_t sluice_first_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_u64_ordered(data, n, order); return k < n ? k : n;
+}
+SLUICE_API size_t sluice_first_n_i32(int32_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_i32_ordered(data, n, order); return k < n ? k : n;
+}
+SLUICE_API size_t sluice_first_n_i64(int64_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_i64_ordered(data, n, order); return k < n ? k : n;
+}
+SLUICE_API size_t sluice_top_n_u32(uint32_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_u32_ordered(data, n, order); return take_tail(data, n, k);
+}
+SLUICE_API size_t sluice_top_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_u64_ordered(data, n, order); return take_tail(data, n, k);
+}
+SLUICE_API size_t sluice_top_n_i32(int32_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_i32_ordered(data, n, order); return take_tail(data, n, k);
+}
+SLUICE_API size_t sluice_top_n_i64(int64_t* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_i64_ordered(data, n, order); return take_tail(data, n, k);
 }
 
 SLUICE_API int sluice_is_sorted_u32(const uint32_t* data, size_t n) {

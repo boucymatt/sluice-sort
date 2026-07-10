@@ -23,6 +23,10 @@ directly and repairs locally; its O(n²) worst case is defused by
 capping it to n <= 512 plus a skew guard that hands off to radix the moment
 any bucket grows too large — so the O(n²) tail can never trigger.
 
+**Sort direction.** Ascending is the default. Every type also has an `_ordered`
+entry point taking `SLUICE_ASCENDING` or `SLUICE_DESCENDING`; descending is the
+ascending result reversed in place (O(n)).
+
 ## Measured vs `std::sort` (this machine, uint32)
 
 Benchmarked over a pool of distinct arrays per size — the realistic case.
@@ -178,6 +182,72 @@ You can always force the compiler explicitly: `make TARGET=windows CXX=/path/to/
 > build sandbox). Install MinGW-w64 / osxcross, or use `USE_ZIG=1`, to produce
 > those binaries.
 
+### Building on ARM
+
+The engine is architecture-neutral C++17 — no inline assembly, no x86
+intrinsics, no pointer-size or packing assumptions — so g++ (or clang++)
+compiles it on ARM the same as on x86. The Makefile carries **no `-march`
+flag**, so it is not tied to any architecture: nothing special is needed to
+target ARM.
+
+Natively on an ARM machine (Raspberry Pi, AWS Graviton, Apple Silicon under
+Linux, etc.): just `make` / `make test`.
+
+Cross-compiling from an x86 host — only the compiler changes; the Makefile
+honours a user-set `CXX`:
+
+```
+make CXX=aarch64-linux-gnu-g++        # 64-bit ARM (AArch64)
+make CXX=arm-linux-gnueabihf-g++      # 32-bit ARM
+make USE_ZIG=1 CXX="zig c++ -target aarch64-linux-gnu"
+```
+
+Optional CPU tuning (defaults to portable `-O3`): append flags via `CXXFLAGS`,
+e.g. `make CXXFLAGS="-march=native"` or `make CXX=aarch64-linux-gnu-g++
+CXXFLAGS="-march=armv8-a"`. On mainstream 64-bit ARM, `uint64_t` and `double`
+are hardware-native (full speed); on an FPU-less 32-bit microcontroller the
+interpolation path's `double` math is software-emulated (correct, slower).
+ARM builds were not compiled in the dev sandbox (x86-only), so run `make test`
+on your ARM target to confirm.
+
+## Command-line tool
+
+```
+sluice                       self-test, then benchmark
+sluice --test                correctness self-test only (exit 1 on failure)
+sluice --bench               benchmark only
+sluice --version             print version
+sluice [--asc|--desc] [--first K | --top K] n1 n2 n3 ...
+                             sort the integers and print them
+```
+
+Direction and selection are independent flags that may appear in any order — no
+`--sort` keyword is required. `--asc` (default) / `--desc` set the sort
+direction. With no selector the whole sorted array prints; `--first K` keeps the
+first K of the sorted result (its head), `--top K` keeps the last K (its tail).
+Non-integer arguments are skipped with a warning; an empty list prints usage;
+`K > n` returns everything and `K = 0` prints nothing.
+
+```
+$ sluice 1 6 4 9 2               # sort ascending (default)
+1 2 4 6 9
+
+$ sluice --desc 1 6 4 9 2        # sort descending
+9 6 4 2 1
+
+$ sluice --first 3 1 6 4 9 2     # head of ascending = 3 smallest
+1 2 4
+
+$ sluice --desc --first 3 1 6 4 9 2   # head of descending = 3 largest
+9 6 4
+
+$ sluice --top 3 1 6 4 9 2       # tail of ascending = 3 largest, ascending
+4 6 9
+
+$ sluice --desc --top 3 1 6 4 9 2     # tail of descending
+4 2 1
+```
+
 ## Using the library
 
 C / C++:
@@ -185,7 +255,8 @@ C / C++:
 ```c
 #include "sluice.h"
 uint32_t data[] = { 9, 1, 8, 2, 7 };
-sluice_sort_u32(data, 5);          // -> 1 2 7 8 9
+sluice_sort_u32(data, 5);                              // ascending -> 1 2 7 8 9
+sluice_sort_u32_ordered(data, 5, SLUICE_DESCENDING);   // -> 9 8 7 2 1
 ```
 
 Link statically: `cc app.c libsluice.a -lstdc++`
@@ -197,17 +268,38 @@ From Python via the shared library (no build step needed):
 import ctypes
 lib = ctypes.CDLL("./build/linux/libsluice.so")
 arr = (ctypes.c_uint32 * 5)(9, 1, 8, 2, 7)
-lib.sluice_sort_u32(arr, 5)
-print(list(arr))                   # [1, 2, 7, 8, 9]
+lib.sluice_sort_u32_ordered(arr, 5, 1)   # 1 = SLUICE_DESCENDING
+print(list(arr))                          # [9, 8, 7, 2, 1]
 ```
 
 ## API
 
 ```c
+typedef enum { SLUICE_ASCENDING = 0, SLUICE_DESCENDING = 1 } sluice_order;
+
+/* ascending shorthands */
 void        sluice_sort_u32(uint32_t* data, size_t n);
 void        sluice_sort_i32(int32_t*  data, size_t n);
 void        sluice_sort_u64(uint64_t* data, size_t n);
 void        sluice_sort_i64(int64_t*  data, size_t n);
+
+/* direction-aware forms */
+void        sluice_sort_u32_ordered(uint32_t* data, size_t n, sluice_order order);
+void        sluice_sort_i32_ordered(int32_t*  data, size_t n, sluice_order order);
+void        sluice_sort_u64_ordered(uint64_t* data, size_t n, sluice_order order);
+void        sluice_sort_i64_ordered(int64_t*  data, size_t n, sluice_order order);
+
+/* head/tail of the array sorted in `order`: first_n keeps the first k, top_n
+   keeps the last k (moved to the front). Return min(k, n). */
+size_t      sluice_first_n_u32(uint32_t* data, size_t n, size_t k, sluice_order order);
+size_t      sluice_first_n_i32(int32_t*  data, size_t n, size_t k, sluice_order order);
+size_t      sluice_first_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order);
+size_t      sluice_first_n_i64(int64_t*  data, size_t n, size_t k, sluice_order order);
+size_t      sluice_top_n_u32(uint32_t* data, size_t n, size_t k, sluice_order order);
+size_t      sluice_top_n_i32(int32_t*  data, size_t n, size_t k, sluice_order order);
+size_t      sluice_top_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order);
+size_t      sluice_top_n_i64(int64_t*  data, size_t n, size_t k, sluice_order order);
+
 int         sluice_is_sorted_u32(const uint32_t* data, size_t n);
 const char* sluice_version(void);
 ```

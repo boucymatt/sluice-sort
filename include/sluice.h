@@ -48,13 +48,40 @@
 extern "C" {
 #endif
 
+/* Sort direction. Ascending is the default throughout. */
+typedef enum {
+    SLUICE_ASCENDING  = 0,
+    SLUICE_DESCENDING = 1
+} sluice_order;
+
 /* Sort an array in place, ascending. n may be 0. Data must not be NULL when
  * n > 0. Equal integer values are indistinguishable, so the result is stable
- * by construction. */
+ * by construction. Shorthand for the *_ordered forms with SLUICE_ASCENDING. */
 SLUICE_API void sluice_sort_u32(uint32_t* data, size_t n);
 SLUICE_API void sluice_sort_i32(int32_t*  data, size_t n);
 SLUICE_API void sluice_sort_u64(uint64_t* data, size_t n);
 SLUICE_API void sluice_sort_i64(int64_t*  data, size_t n);
+
+/* Sort in place in the requested direction (SLUICE_ASCENDING/SLUICE_DESCENDING). */
+SLUICE_API void sluice_sort_u32_ordered(uint32_t* data, size_t n, sluice_order order);
+SLUICE_API void sluice_sort_i32_ordered(int32_t*  data, size_t n, sluice_order order);
+SLUICE_API void sluice_sort_u64_ordered(uint64_t* data, size_t n, sluice_order order);
+SLUICE_API void sluice_sort_i64_ordered(int64_t*  data, size_t n, sluice_order order);
+
+/* Head and tail of the array sorted in `order`. first_n keeps the first k
+ * (the head); top_n keeps the last k (the tail). Both sort in place, move the
+ * kept run to the FRONT of data, and return the count kept (min(k, n)). With
+ * SLUICE_ASCENDING (the default) first_n gives the k smallest and top_n the k
+ * largest; SLUICE_DESCENDING flips both. */
+SLUICE_API size_t sluice_first_n_u32(uint32_t* data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_first_n_i32(int32_t*  data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_first_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_first_n_i64(int64_t*  data, size_t n, size_t k, sluice_order order);
+
+SLUICE_API size_t sluice_top_n_u32(uint32_t* data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_top_n_i32(int32_t*  data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_top_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_top_n_i64(int64_t*  data, size_t n, size_t k, sluice_order order);
 
 /* Returns 1 if the array is already in non-decreasing order, else 0.
  * Provided because "is it already sorted?" is a cheap, common query. */

@@ -48,7 +48,7 @@ SHARED_LIB := $(BUILD)/lib$(NAME)$(SO_EXT)
 OBJ_SHARED := $(BUILD)/sluice.shared.o
 OBJ_STATIC := $(BUILD)/sluice.static.o
 
-COMMON_CXXFLAGS := -std=c++17 -O3 -Wall -Wextra -I$(INC_DIR)
+COMMON_CXXFLAGS := -std=c++17 -O3 -Wall -Wextra -I$(INC_DIR) $(CXXFLAGS)
 
 # ---- per-target toolchain, extensions, and flags ---------------------------
 # Each block sets TARGET_CXX (the *default* compiler for that target) plus the

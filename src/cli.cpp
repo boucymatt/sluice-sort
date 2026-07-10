@@ -1,14 +1,22 @@
 // Sluice command-line tool: correctness self-test + benchmark vs std::sort.
-//   sluice           run self-test, then benchmark
-//   sluice --test    run self-test only  (exit 1 on failure)
-//   sluice --bench   run benchmark only
-//   sluice --version print version
+//   sluice                      run self-test, then benchmark
+//   sluice --test               run self-test only  (exit 1 on failure)
+//   sluice --bench              run benchmark only
+//   sluice --version            print version
+//   sluice --sort [--asc|--desc] n1 n2 n3 ...
+//                               sort the given integers and print them
+//                               (ascending is the default when no flag given)
+//   sluice --first K n1 n2 n3 ...
+//                               print the K smallest (ascending)
+//   sluice --top K n1 n2 n3 ...
+//                               print the K largest (descending)
 #include "sluice.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -65,6 +73,43 @@ static bool self_test() {
         std::sort(gold.begin(), gold.end());
         sluice_sort_u64(a.data(), n);
         if (a != gold) { std::printf("  u64 FAIL n=%zu\n", n); return false; }
+    }
+    // descending: must equal the reverse of the ascending result
+    for (int t = 0; t < 500; ++t) {
+        std::uniform_int_distribution<int> nd(0, 400);
+        size_t n = nd(rng);
+        std::uniform_int_distribution<int32_t> vd(-1000000, 1000000);
+        std::vector<int32_t> a(n), gold(n);
+        for (auto& x : a) x = vd(rng);
+        gold = a;
+        std::sort(gold.begin(), gold.end(), std::greater<int32_t>());
+        sluice_sort_i32_ordered(a.data(), n, SLUICE_DESCENDING);
+        if (a != gold) { std::printf("  i32 desc FAIL n=%zu\n", n); return false; }
+    }
+    // first_n = head, top_n = tail, of the array sorted in `order`
+    for (int t = 0; t < 500; ++t) {
+        std::uniform_int_distribution<int> nd(1, 400);
+        size_t n = nd(rng);
+        size_t k = std::uniform_int_distribution<size_t>(0, n + 5)(rng);  // incl. k>n
+        size_t kk = std::min(k, n);
+        sluice_order ord = (t & 1) ? SLUICE_DESCENDING : SLUICE_ASCENDING;
+        std::uniform_int_distribution<int32_t> vd(-1000000, 1000000);
+        std::vector<int32_t> a(n);
+        for (auto& x : a) x = vd(rng);
+        std::vector<int32_t> s(a);
+        if (ord == SLUICE_ASCENDING) std::sort(s.begin(), s.end());
+        else                         std::sort(s.begin(), s.end(), std::greater<int32_t>());
+
+        std::vector<int32_t> af(a);
+        size_t wf = sluice_first_n_i32(af.data(), n, k, ord);
+        if (wf != kk || !std::equal(s.begin(), s.begin() + kk, af.begin())) {
+            std::printf("  first_n FAIL n=%zu k=%zu\n", n, k); return false;
+        }
+        std::vector<int32_t> at(a);
+        size_t wt = sluice_top_n_i32(at.data(), n, k, ord);
+        if (wt != kk || !std::equal(s.end() - kk, s.end(), at.begin())) {  // tail kk
+            std::printf("  top_n FAIL n=%zu k=%zu\n", n, k); return false;
+        }
     }
     return true;
 }
@@ -126,9 +171,73 @@ static void benchmark() {
     row("n=1M    already sorted", make_pool(rng, 1000000, B, 0xFFFFFFFFu, true),  7);
 }
 
+// --------------------------------------------- custom-array sort / select
+// Unified command: flags may appear in any order; no --sort keyword required.
+//   [--asc|--desc]  set direction (default ascending)
+//   --first K       keep the first K of the sorted result (the head)
+//   --top   K       keep the last  K of the sorted result (the tail)
+//   n1 n2 ...        the integers to sort
+// With no --first/--top, the whole sorted array is printed.
+static int run_select(int argc, char** argv) {
+    sluice_order order = SLUICE_ASCENDING;
+    enum { OP_SORT, OP_FIRST, OP_TOP } op = OP_SORT;
+    size_t k = 0;
+    std::vector<int64_t> nums;
+
+    for (int i = 1; i < argc; ++i) {
+        const char* a = argv[i];
+        if      (std::strcmp(a, "--asc")  == 0) { order = SLUICE_ASCENDING;  continue; }
+        else if (std::strcmp(a, "--desc") == 0) { order = SLUICE_DESCENDING; continue; }
+        else if (std::strcmp(a, "--sort") == 0) { op = OP_SORT;              continue; }
+        else if (std::strcmp(a, "--first") == 0 || std::strcmp(a, "--top") == 0) {
+            op = (a[2] == 'f') ? OP_FIRST : OP_TOP;
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "sluice %s: missing K\n", a);
+                return 1;
+            }
+            char* end = nullptr;
+            long long kll = std::strtoll(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || kll < 0) {
+                std::fprintf(stderr, "sluice %s: K must be a non-negative integer, got '%s'\n", a, argv[i]);
+                return 1;
+            }
+            k = static_cast<size_t>(kll);
+            continue;
+        }
+        char* end = nullptr;
+        long long v = std::strtoll(a, &end, 10);
+        if (end == a || *end != '\0') {
+            std::fprintf(stderr, "sluice: skipping non-integer '%s'\n", a);
+            continue;
+        }
+        nums.push_back(static_cast<int64_t>(v));
+    }
+
+    if (nums.empty()) {
+        std::fprintf(stderr,
+            "usage: sluice [--asc|--desc] [--first K | --top K] n1 n2 n3 ...\n");
+        return 1;
+    }
+
+    size_t n = nums.size(), count = n;
+    if      (op == OP_FIRST) count = sluice_first_n_i64(nums.data(), n, k, order);
+    else if (op == OP_TOP)   count = sluice_top_n_i64(nums.data(), n, k, order);
+    else                     sluice_sort_i64_ordered(nums.data(), n, order);
+
+    for (size_t i = 0; i < count; ++i)
+        std::printf("%s%lld", i ? " " : "", static_cast<long long>(nums[i]));
+    std::printf("\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const char* mode = argc > 1 ? argv[1] : "";
     if (std::strcmp(mode, "--version") == 0) { std::printf("%s\n", sluice_version()); return 0; }
+
+    // Anything that isn't a diagnostic mode is treated as a sort/select command.
+    bool diagnostic = (argc == 1) || std::strcmp(mode, "--test") == 0
+                                  || std::strcmp(mode, "--bench") == 0;
+    if (!diagnostic) return run_select(argc, argv);
 
     if (std::strcmp(mode, "--bench") != 0) {
         std::printf("%s — self-test\n", sluice_version());
