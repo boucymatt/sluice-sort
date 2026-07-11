@@ -1,5 +1,6 @@
 /* ==========================================================================
- * Sluice — an adaptive integer sorting engine.
+ * Sluice — an adaptive numeric sorting engine that routes every dataset
+ * through its fastest available sorting strategy.
  *
  * A "sluice" channels a mixed stream and separates it into graded outputs by
  * routing it through the right screen. This engine does the same: it inspects
@@ -68,6 +69,15 @@ SLUICE_API void sluice_sort_i32_ordered(int32_t*  data, size_t n, sluice_order o
 SLUICE_API void sluice_sort_u64_ordered(uint64_t* data, size_t n, sluice_order order);
 SLUICE_API void sluice_sort_i64_ordered(int64_t*  data, size_t n, sluice_order order);
 
+/* Floating point: sorted via an IEEE-754 order-preserving key transform, so the
+ * usual engine paths apply. Ordering is -inf < ... < -0 < +0 < ... < +inf; NaNs
+ * are ordered by bit pattern (a consistent total order — well-defined, unlike
+ * std::sort where NaN breaks the ordering). Ascending is the default. */
+SLUICE_API void sluice_sort_f32(float*  data, size_t n);
+SLUICE_API void sluice_sort_f64(double* data, size_t n);
+SLUICE_API void sluice_sort_f32_ordered(float*  data, size_t n, sluice_order order);
+SLUICE_API void sluice_sort_f64_ordered(double* data, size_t n, sluice_order order);
+
 /* Head and tail of the array sorted in `order`. first_n keeps the first k
  * (the head); top_n keeps the last k (the tail). Both sort in place, move the
  * kept run to the FRONT of data, and return the count kept (min(k, n)). With
@@ -82,6 +92,50 @@ SLUICE_API size_t sluice_top_n_u32(uint32_t* data, size_t n, size_t k, sluice_or
 SLUICE_API size_t sluice_top_n_i32(int32_t*  data, size_t n, size_t k, sluice_order order);
 SLUICE_API size_t sluice_top_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order);
 SLUICE_API size_t sluice_top_n_i64(int64_t*  data, size_t n, size_t k, sluice_order order);
+
+SLUICE_API size_t sluice_first_n_f32(float*  data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_first_n_f64(double* data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_top_n_f32(float*  data, size_t n, size_t k, sluice_order order);
+SLUICE_API size_t sluice_top_n_f64(double* data, size_t n, size_t k, sluice_order order);
+
+/* ----- unified dispatcher (one call over every type) --------------------
+ * The specialized functions above remain the fastest route. This convenience
+ * entry point selects among them at runtime by element type, and can also
+ * profile the run. */
+
+/* Supported element types. Passing anything else returns SLUICE_ERR_TYPE. */
+typedef enum {
+    SLUICE_U32 = 0, SLUICE_I32, SLUICE_U64, SLUICE_I64, SLUICE_F32, SLUICE_F64
+} sluice_dtype;
+
+/* Return status. */
+typedef enum {
+    SLUICE_OK       =  0,
+    SLUICE_ERR_TYPE = -1,   /* unsupported dtype */
+    SLUICE_ERR_NULL = -2    /* NULL data with n>0, or stats requested but NULL */
+} sluice_status;
+
+/* Profiling info, filled when collect_stats is nonzero. */
+typedef struct {
+    const char* algorithm;      /* "insertion"|"interpolation"|"counting"|"radix"|"already sorted"|"std::sort" */
+    double      time_ms;        /* wall time of the sort */
+    size_t      memory_bytes;   /* auxiliary heap the chosen path used */
+    int         passes;         /* radix passes (0 for other paths) */
+    int         already_sorted; /* 1 if the input was already in order */
+    double      duplicate_pct;  /* 100 * (1 - distinct/n) */
+    double      range;          /* span of the sorted key domain (= value span for integers) */
+    size_t      n;              /* element count */
+} sluice_stats;
+
+/* Unified sort. `type` selects the element type; `select` > 0 keeps the first N
+ * (smallest/head), < 0 keeps the top |N| (largest/tail), 0 sorts everything;
+ * `order` may be NULL for ascending. When `collect_stats` is nonzero, `stats`
+ * (must be non-NULL) is filled with profiling info at some cost; when 0, this
+ * dispatches straight to the specialized fast path with no profiling overhead.
+ * Returns SLUICE_OK, SLUICE_ERR_TYPE, or SLUICE_ERR_NULL. */
+SLUICE_API sluice_status sluice_sort(sluice_dtype type, void* data, size_t n,
+                                     ptrdiff_t select, const sluice_order* order,
+                                     int collect_stats, sluice_stats* stats);
 
 /* Returns 1 if the array is already in non-decreasing order, else 0.
  * Provided because "is it already sorted?" is a cheap, common query. */

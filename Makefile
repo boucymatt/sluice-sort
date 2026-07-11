@@ -152,7 +152,11 @@ sanitize:
 strict:
 	@mkdir -p $(BUILD)
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wconversion -Wstrict-aliasing=2 -Werror \
-	  -I$(INC_DIR) -c $(LIB_SRC) -o $(BUILD)/sluice.strict.o && echo "strict: no warnings"
+	  -I$(INC_DIR) -c $(LIB_SRC) -o $(BUILD)/sluice.strict.o
+	@printf '#include "sluice.hpp"\nint main(){return 0;}\n' > $(BUILD)/hpp_check.cpp
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wconversion -Wstrict-aliasing=2 -Werror \
+	  -I$(INC_DIR) -c $(BUILD)/hpp_check.cpp -o $(BUILD)/hpp_check.o
+	@echo "strict: no warnings (library + C++ header)"
 
 all-targets:
 	@for t in linux windows macos; do \

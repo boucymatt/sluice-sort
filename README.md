@@ -310,6 +310,42 @@ lib.sluice_sort_u32_ordered(arr, 5, 1)   # 1 = SLUICE_DESCENDING
 print(list(arr))                          # [9, 8, 7, 2, 1]
 ```
 
+### C++ wrapper (`sluice.hpp`)
+
+Header-only, type-safe, size-deduced. Element type and length come from the
+container; each call dispatches at compile time to the matching specialized C
+function, so there's no runtime type switch and no overhead over the C ABI.
+Unsupported element types are a compile error, not a runtime check.
+
+```cpp
+#include "sluice.hpp"
+std::vector<double> v = { 3.14, -2.5, 0.0, -1.0, 2.71 };
+
+sluice::sort(v);            // ascending
+sluice::descending(v);
+sluice::first(v, 20);       // 20 smallest, moved to the front
+sluice::top(v, 20);         // 20 largest, moved to the front
+sluice::sort(ptr, n);       // raw pointer + size also works
+```
+
+### One call over any type + profiling
+
+The C ABI also exposes a single dispatcher over all six types. `select > 0`
+keeps the first N, `< 0` the top |N|, `0` sorts all; `order` may be `NULL`
+(ascending). With `collect_stats = 0` it routes straight to the fast specialized
+path; with `1` it fills a `sluice_stats` (algorithm chosen, wall time, auxiliary
+memory, radix passes, already-sorted, duplicate %, value range).
+
+```c
+sluice_stats st;
+sluice_sort(SLUICE_U32, data, n, /*select=*/0, /*order=*/NULL, /*stats=*/1, &st);
+// st.algorithm -> "counting", st.duplicate_pct -> 99.0, st.range -> 999, ...
+```
+
+The specialized `sluice_sort_*` / `sluice_first_n_*` / `sluice_top_n_*` functions
+remain the fastest route and are unchanged; the dispatcher is a convenience over
+them (with optional profiling that the fast path never pays for).
+
 ## API
 
 ```c
@@ -341,6 +377,25 @@ size_t      sluice_top_n_u32(uint32_t* data, size_t n, size_t k, sluice_order or
 size_t      sluice_top_n_i32(int32_t*  data, size_t n, size_t k, sluice_order order);
 size_t      sluice_top_n_u64(uint64_t* data, size_t n, size_t k, sluice_order order);
 size_t      sluice_top_n_i64(int64_t*  data, size_t n, size_t k, sluice_order order);
+/* first_n / top_n exist for f32 and f64 too, same shape. */
+
+/* unified dispatcher over all six types, with optional profiling */
+typedef enum { SLUICE_U32, SLUICE_I32, SLUICE_U64, SLUICE_I64, SLUICE_F32, SLUICE_F64 } sluice_dtype;
+typedef enum { SLUICE_OK = 0, SLUICE_ERR_TYPE = -1, SLUICE_ERR_NULL = -2 } sluice_status;
+typedef struct {
+    const char* algorithm;      /* path taken */
+    double      time_ms;
+    size_t      memory_bytes;   /* auxiliary heap the chosen path used */
+    int         passes;         /* radix passes (else 0) */
+    int         already_sorted;
+    double      duplicate_pct;  /* 100 * (1 - distinct/n) */
+    double      range;          /* span of the sorted key domain */
+    size_t      n;
+} sluice_stats;
+/* select: >0 first N, <0 top |N|, 0 all.  order: NULL = ascending.
+   collect_stats: 0 = fast path, 1 = fill stats (must be non-NULL). */
+sluice_status sluice_sort(sluice_dtype type, void* data, size_t n, ptrdiff_t select,
+                          const sluice_order* order, int collect_stats, sluice_stats* stats);
 
 int         sluice_is_sorted_u32(const uint32_t* data, size_t n);
 const char* sluice_version(void);
@@ -350,7 +405,9 @@ const char* sluice_version(void);
 
 ```
 include/sluice.h   public C API (stable ABI, DLL export macros)
-src/sluice.cpp     the engine (dispatcher + insertion/counting/radix)
+include/sluice.hpp header-only C++ wrapper (type-safe, size-deduced)
+src/sluice.cpp     the engine (dispatcher + insertion/interpolation/counting/radix)
 src/cli.cpp        self-test + benchmark harness (the executable)
 Makefile           cross-platform build
+docs/              benchmark charts
 ```

@@ -14,10 +14,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -167,6 +170,92 @@ static bool self_test() {
             sluice_sort_i64(v.data(), v.size());
             if (v != g) { std::printf("  i64 extreme FAIL sz=%zu\n", v.size()); return false; }
         }
+    }
+
+    // --- float / double: value-sort must match std::sort (non-NaN) -------
+    auto rand_f32 = [&]() { uint32_t b;
+        do { b = static_cast<uint32_t>(rng()); } while (((b >> 23) & 0xFFu) == 0xFFu && (b & 0x7FFFFFu) != 0);
+        float f; std::memcpy(&f, &b, sizeof f); return f; };
+    auto rand_f64 = [&]() { uint64_t b; std::mt19937_64 r2(rng());
+        do { b = r2(); } while (((b >> 52) & 0x7FFull) == 0x7FFull && (b & 0xFFFFFFFFFFFFFull) != 0);
+        double d; std::memcpy(&d, &b, sizeof d); return d; };
+    const float  fspec[] = {0.0f,-0.0f,1.0f,-1.0f,INFINITY,-INFINITY,FLT_MIN,-FLT_MIN,
+                            FLT_MAX,-FLT_MAX,std::numeric_limits<float>::denorm_min(),3.14f,-2.5f};
+    for (size_t n : {size_t(2), size_t(16), size_t(17), size_t(511), size_t(512),
+                     size_t(513), size_t(5000)}) {
+        std::vector<float> a(n);
+        for (size_t i = 0; i < n; ++i) a[i] = (i < sizeof(fspec)/sizeof(float)) ? fspec[i] : rand_f32();
+        std::vector<float> g(a); std::sort(g.begin(), g.end());
+        std::vector<float> asc(a); sluice_sort_f32(asc.data(), n);
+        for (size_t i = 0; i < n; ++i) if (asc[i] != g[i]) { std::printf("  f32 FAIL n=%zu i=%zu\n", n, i); return false; }
+        std::vector<float> dsc(a); sluice_sort_f32_ordered(dsc.data(), n, SLUICE_DESCENDING);
+        for (size_t i = 0; i < n; ++i) if (dsc[i] != g[n-1-i]) { std::printf("  f32 desc FAIL n=%zu\n", n); return false; }
+    }
+    for (size_t n : {size_t(2), size_t(512), size_t(513), size_t(5000)}) {
+        std::vector<double> a(n);
+        for (size_t i = 0; i < n; ++i) a[i] = rand_f64();
+        std::vector<double> g(a); std::sort(g.begin(), g.end());
+        sluice_sort_f64(a.data(), n);
+        for (size_t i = 0; i < n; ++i) if (a[i] != g[i]) { std::printf("  f64 FAIL n=%zu\n", n); return false; }
+    }
+    // NaN: not comparable, but Sluice must produce a permutation without UB
+    {
+        float nan = std::numeric_limits<float>::quiet_NaN();
+        std::vector<float> a = {nan, 1.0f, -1.0f, nan, 0.0f, INFINITY, -nan, 2.0f};
+        auto bits = [](const std::vector<float>& v){ std::vector<uint32_t> b(v.size());
+            for (size_t i=0;i<v.size();++i) { std::memcpy(&b[i],&v[i],4); }
+            std::sort(b.begin(),b.end()); return b; };
+        std::vector<uint32_t> before = bits(a);
+        sluice_sort_f32(a.data(), a.size());
+        if (bits(a) != before) { std::printf("  f32 NaN not a permutation\n"); return false; }
+    }
+
+    // --- unified dispatcher: results match the specialized paths ----------
+    {
+        std::mt19937 r(99);
+        for (int t = 0; t < 300; ++t) {
+            size_t n = r() % 2000;
+            std::vector<int32_t> base(n);
+            for (auto& x : base) x = static_cast<int32_t>(r()) ;
+            std::vector<int32_t> g(base); std::sort(g.begin(), g.end());
+            // sort all, ascending, no stats
+            std::vector<int32_t> a(base);
+            if (sluice_sort(SLUICE_I32, a.data(), n, 0, nullptr, 0, nullptr) != SLUICE_OK ||
+                a != g) { std::printf("  unified i32 sort FAIL n=%zu\n", n); return false; }
+            // first k via select>0
+            size_t k = n ? (r() % n) : 0;
+            std::vector<int32_t> f(base);
+            sluice_order asc = SLUICE_ASCENDING;
+            sluice_sort(SLUICE_I32, f.data(), n, static_cast<ptrdiff_t>(k), &asc, 0, nullptr);
+            if (!std::equal(g.begin(), g.begin() + std::min(k,n), f.begin())) { std::printf("  unified first FAIL\n"); return false; }
+            // top k via select<0
+            std::vector<int32_t> tp(base);
+            sluice_sort(SLUICE_I32, tp.data(), n, -static_cast<ptrdiff_t>(k), &asc, 0, nullptr);
+            if (!std::equal(g.end() - std::min(k,n), g.end(), tp.begin())) { std::printf("  unified top FAIL\n"); return false; }
+        }
+        // stats path: already-sorted detection + correctness
+        std::vector<uint32_t> srt(1000); for (size_t i=0;i<srt.size();++i) srt[i]=static_cast<uint32_t>(i);
+        sluice_stats s;
+        if (sluice_sort(SLUICE_U32, srt.data(), srt.size(), 0, nullptr, 1, &s) != SLUICE_OK) { std::printf("  stats rc FAIL\n"); return false; }
+        if (!s.already_sorted || std::strcmp(s.algorithm, "already sorted") != 0) { std::printf("  stats already_sorted FAIL\n"); return false; }
+        // stats with duplicates + bounded range -> counting
+        std::vector<uint32_t> dup(50000); std::mt19937 r2(7); for (auto& x : dup) x = r2() % 100;
+        std::vector<uint32_t> dgold(dup); std::sort(dgold.begin(), dgold.end());
+        sluice_sort(SLUICE_U32, dup.data(), dup.size(), 0, nullptr, 1, &s);
+        if (dup != dgold || s.duplicate_pct < 99.0 || std::strcmp(s.algorithm,"counting") != 0) { std::printf("  stats counting FAIL\n"); return false; }
+        // error paths
+        if (sluice_sort(static_cast<sluice_dtype>(42), nullptr, 0, 0, nullptr, 0, nullptr) != SLUICE_ERR_TYPE) { std::printf("  bad-type FAIL\n"); return false; }
+        if (sluice_sort(SLUICE_U32, dup.data(), 1, 0, nullptr, 1, nullptr) != SLUICE_ERR_NULL) { std::printf("  null-stats FAIL\n"); return false; }
+    }
+
+    // --- float first_n / top_n -------------------------------------------
+    {
+        std::vector<float> base = {3.14f,-2.5f,0.0f,-1.0f,2.71f,9.9f,-8.1f,4.0f};
+        std::vector<float> g(base); std::sort(g.begin(), g.end());
+        std::vector<float> f(base); size_t w = sluice_first_n_f32(f.data(), f.size(), 3, SLUICE_ASCENDING);
+        if (w != 3 || !std::equal(g.begin(), g.begin()+3, f.begin())) { std::printf("  f32 first_n FAIL\n"); return false; }
+        std::vector<float> tp(base); w = sluice_top_n_f32(tp.data(), tp.size(), 3, SLUICE_ASCENDING);
+        if (w != 3 || !std::equal(g.end()-3, g.end(), tp.begin())) { std::printf("  f32 top_n FAIL\n"); return false; }
     }
     return true;
 }

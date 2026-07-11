@@ -9,6 +9,7 @@
 #include "sluice.h"
 
 #include <algorithm>   // std::sort, std::copy
+#include <chrono>      // stats timing
 #include <cstring>     // std::memcpy
 #include <new>         // std::bad_alloc
 #include <vector>
@@ -150,14 +151,20 @@ void radix(U* a, size_t n) {
 }
 
 // --- the dispatcher -----------------------------------------------------
+// Optional out-parameter: when non-null, records which path actually ran and
+// how many radix passes it used. Left null on the fast path (no overhead).
+struct core_path { const char* algorithm; int passes; };
+
 template <class U>
-void sluice_core(U* a, size_t n) {
+void sluice_core(U* a, size_t n, core_path* path = nullptr) {
+    auto note = [&](const char* alg, int passes) { if (path) { path->algorithm = alg; path->passes = passes; } };
+    note("insertion", 0);
     if (n < 2) return;
     if (n < INSERTION_MAX) { insertion(a, n); return; }
     // small arrays: the interpolation placement sort wins here. If it detects
     // skew it returns false and we fall through to radix (n is small, so the
     // radix allocation is tiny).
-    if (n <= INTERP_MAX && interp_small(a, static_cast<int>(n))) return;
+    if (n <= INTERP_MAX && interp_small(a, static_cast<int>(n))) { note("interpolation", 0); return; }
 
     // one scan: min, max, and "already sorted?" — cheap, high-value.
     U mn = a[0], mx = a[0];
@@ -168,18 +175,18 @@ void sluice_core(U* a, size_t n) {
         if (x < mn) mn = x;
         else if (x > mx) mx = x;
     }
-    if (sorted) return;
+    if (sorted) { note("already sorted", 0); return; }
 
     const uint64_t range = static_cast<uint64_t>(mx) - static_cast<uint64_t>(mn);
 
     // bounded range -> counting sort (pure O(n), no comparisons)
     if (range < COUNTING_CAP && range <= COUNTING_LOAD * static_cast<uint64_t>(n)) {
-        try { counting(a, n, mn, range); return; }
+        try { counting(a, n, mn, range); note("counting", 0); return; }
         catch (const std::bad_alloc&) { /* fall through */ }
     }
     // general integers -> radix; std::sort is the in-place safety net
-    try { radix(a, n); return; }
-    catch (const std::bad_alloc&) { std::sort(a, a + n); }
+    try { radix(a, n); note("radix", static_cast<int>(sizeof(U))); return; }
+    catch (const std::bad_alloc&) { std::sort(a, a + n); note("std::sort", 0); }
 }
 
 // map signed <-> unsigned preserving order by flipping the sign bit
@@ -195,6 +202,85 @@ size_t take_tail(U* data, size_t n, size_t k) {
     size_t kk = k < n ? k : n;
     if (kk && kk < n) std::memmove(data, data + (n - kk), kk * sizeof(U));
     return kk;
+}
+
+// IEEE-754 <-> order-preserving unsigned key. For a float's bit pattern b:
+//   positive (sign 0) -> flip the sign bit;  negative (sign 1) -> flip all bits.
+// The resulting unsigned keys sort in the same order as the floats, including
+// -inf < ... < -0 < +0 < ... < +inf. All-unsigned ops (no signed overflow /
+// narrowing), so it stays clean under -Wconversion. bit access is via memcpy in
+// the callers, since float<->uint is not a permitted alias.
+inline uint32_t fkey32(uint32_t b) { return b ^ (0x80000000u | (0u - (b >> 31))); }
+inline uint32_t funkey32(uint32_t k) { return k ^ (((k >> 31) - 1u) | 0x80000000u); }
+inline uint64_t fkey64(uint64_t b) { return b ^ (0x8000000000000000ull | (0ull - (b >> 63))); }
+inline uint64_t funkey64(uint64_t k) { return k ^ (((k >> 63) - 1ull) | 0x8000000000000000ull); }
+
+// --- unified dispatcher support: value<->key transforms per domain -------
+enum class Domain { Unsigned, Signed, Float };
+inline uint32_t to_key(uint32_t v, Domain d)   { return d==Domain::Float ? fkey32(v)   : (d==Domain::Signed ? (v ^ 0x80000000u)          : v); }
+inline uint64_t to_key(uint64_t v, Domain d)   { return d==Domain::Float ? fkey64(v)   : (d==Domain::Signed ? (v ^ 0x8000000000000000ull) : v); }
+inline uint32_t from_key(uint32_t k, Domain d) { return d==Domain::Float ? funkey32(k) : (d==Domain::Signed ? (k ^ 0x80000000u)          : k); }
+inline uint64_t from_key(uint64_t k, Domain d) { return d==Domain::Float ? funkey64(k) : (d==Domain::Signed ? (k ^ 0x8000000000000000ull) : k); }
+
+// Instrumented sort: transforms to keys, profiles the run (algorithm, timing,
+// memory, passes, already-sorted, duplicate %, range), then applies the
+// direction and first/top selection and writes results back. Used only when the
+// caller asks for stats — the fast path never allocates this key buffer.
+template <class T, class KeyT>
+sluice_status sort_stats(T* data, size_t n, ptrdiff_t select, sluice_order order,
+                         sluice_stats* st, Domain dom) {
+    st->algorithm = "none"; st->time_ms = 0.0; st->memory_bytes = 0;
+    st->passes = 0; st->already_sorted = 1; st->duplicate_pct = 0.0;
+    st->range = 0.0; st->n = n;
+    if (n < 2) return SLUICE_OK;
+
+    std::vector<KeyT> keys;
+    try { keys.resize(n); }
+    catch (const std::bad_alloc&) {
+        std::sort(data, data + n);
+        if (order == SLUICE_DESCENDING) std::reverse(data, data + n);
+        st->algorithm = "std::sort"; return SLUICE_OK;
+    }
+
+    KeyT first; std::memcpy(&first, &data[0], sizeof first); first = to_key(first, dom);
+    KeyT mn = first, mx = first; keys[0] = first;
+    bool sorted = true;
+    for (size_t i = 1; i < n; ++i) {
+        KeyT k; std::memcpy(&k, &data[i], sizeof k); k = to_key(k, dom);
+        keys[i] = k;
+        if (k < keys[i - 1]) sorted = false;
+        if (k < mn) mn = k; else if (k > mx) mx = k;
+    }
+    st->already_sorted = sorted ? 1 : 0;
+    st->range = static_cast<double>(mx) - static_cast<double>(mn);
+
+    core_path path{ "insertion", 0 };
+    auto t0 = std::chrono::steady_clock::now();
+    sluice_core(keys.data(), n, &path);
+    auto t1 = std::chrono::steady_clock::now();
+    st->time_ms   = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    st->algorithm = path.algorithm;
+    st->passes    = path.passes;
+
+    size_t distinct = 1;
+    for (size_t i = 1; i < n; ++i) if (keys[i] != keys[i - 1]) ++distinct;
+    st->duplicate_pct = 100.0 * (1.0 - static_cast<double>(distinct) / static_cast<double>(n));
+
+    size_t mem = 0;
+    if (std::strcmp(path.algorithm, "radix") == 0)
+        mem = n * sizeof(KeyT);
+    else if (std::strcmp(path.algorithm, "counting") == 0)
+        mem = (static_cast<size_t>(st->range) + 1) * sizeof(size_t);
+    if (dom == Domain::Float) mem += n * sizeof(KeyT);   // the transform buffer
+    st->memory_bytes = mem;
+
+    if (order == SLUICE_DESCENDING) std::reverse(keys.begin(), keys.end());
+    for (size_t i = 0; i < n; ++i) { KeyT b = from_key(keys[i], dom); std::memcpy(&data[i], &b, sizeof b); }
+    if (select < 0) {                                    // top |select|: tail -> front
+        size_t k = static_cast<size_t>(-select); if (k > n) k = n;
+        if (k && k < n) std::memmove(data, data + (n - k), k * sizeof(T));
+    }
+    return SLUICE_OK;
 }
 
 }  // namespace
@@ -237,6 +323,40 @@ SLUICE_API void sluice_sort_u64(uint64_t* data, size_t n) { sluice_sort_u64_orde
 SLUICE_API void sluice_sort_i32(int32_t*  data, size_t n) { sluice_sort_i32_ordered(data, n, SLUICE_ASCENDING); }
 SLUICE_API void sluice_sort_i64(int64_t*  data, size_t n) { sluice_sort_i64_ordered(data, n, SLUICE_ASCENDING); }
 
+// float / double: transform each value to an order-preserving unsigned key
+// (memcpy for the bit access — float<->uint is not a permitted alias), sort the
+// keys with the existing engine, then transform back. NaNs are ordered by bit
+// pattern, a consistent total order (unlike std::sort, for which NaN is UB).
+// On allocation failure, fall back to std::sort (in-place, no extra memory).
+SLUICE_API void sluice_sort_f32_ordered(float* data, size_t n, sluice_order order) {
+    if (n < 2) return;
+    try {
+        std::vector<uint32_t> keys(n);
+        for (size_t i = 0; i < n; ++i) { uint32_t b; std::memcpy(&b, &data[i], sizeof b); keys[i] = fkey32(b); }
+        sluice_core(keys.data(), n);
+        if (order == SLUICE_DESCENDING) std::reverse(keys.begin(), keys.end());
+        for (size_t i = 0; i < n; ++i) { uint32_t b = funkey32(keys[i]); std::memcpy(&data[i], &b, sizeof b); }
+    } catch (const std::bad_alloc&) {
+        std::sort(data, data + n);
+        if (order == SLUICE_DESCENDING) std::reverse(data, data + n);
+    }
+}
+SLUICE_API void sluice_sort_f64_ordered(double* data, size_t n, sluice_order order) {
+    if (n < 2) return;
+    try {
+        std::vector<uint64_t> keys(n);
+        for (size_t i = 0; i < n; ++i) { uint64_t b; std::memcpy(&b, &data[i], sizeof b); keys[i] = fkey64(b); }
+        sluice_core(keys.data(), n);
+        if (order == SLUICE_DESCENDING) std::reverse(keys.begin(), keys.end());
+        for (size_t i = 0; i < n; ++i) { uint64_t b = funkey64(keys[i]); std::memcpy(&data[i], &b, sizeof b); }
+    } catch (const std::bad_alloc&) {
+        std::sort(data, data + n);
+        if (order == SLUICE_DESCENDING) std::reverse(data, data + n);
+    }
+}
+SLUICE_API void sluice_sort_f32(float*  data, size_t n) { sluice_sort_f32_ordered(data, n, SLUICE_ASCENDING); }
+SLUICE_API void sluice_sort_f64(double* data, size_t n) { sluice_sort_f64_ordered(data, n, SLUICE_ASCENDING); }
+
 // first_n / top_n: head and tail of the array sorted in `order`.
 //   first_n -> sort, keep the first k (head; already at the front)
 //   top_n   -> sort, keep the last k (tail), moved to the front
@@ -266,6 +386,66 @@ SLUICE_API size_t sluice_top_n_i32(int32_t* data, size_t n, size_t k, sluice_ord
 SLUICE_API size_t sluice_top_n_i64(int64_t* data, size_t n, size_t k, sluice_order order) {
     sluice_sort_i64_ordered(data, n, order); return take_tail(data, n, k);
 }
+
+// float / double first_n (head) and top_n (tail): sort in `order`, then keep
+// the head or move the tail to the front. Mirrors the integer selectors.
+SLUICE_API size_t sluice_first_n_f32(float* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_f32_ordered(data, n, order); return k < n ? k : n;
+}
+SLUICE_API size_t sluice_first_n_f64(double* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_f64_ordered(data, n, order); return k < n ? k : n;
+}
+SLUICE_API size_t sluice_top_n_f32(float* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_f32_ordered(data, n, order); return take_tail(data, n, k);
+}
+SLUICE_API size_t sluice_top_n_f64(double* data, size_t n, size_t k, sluice_order order) {
+    sluice_sort_f64_ordered(data, n, order); return take_tail(data, n, k);
+}
+
+// --- unified dispatcher --------------------------------------------------
+// One entry point over all six types. select > 0 keeps the first N, < 0 the top
+// |N|, 0 sorts all. order NULL = ascending. collect_stats=0 takes the fast path
+// (specialized functions, no profiling); collect_stats=1 fills stats. The
+// specialized *_ordered / *_first_n / *_top_n functions remain the fastest
+// route and are unchanged.
+#define SLUICE_FAST(SUF, T)                                                     \
+    do {                                                                        \
+        T* p = static_cast<T*>(data);                                           \
+        if (select > 0)      sluice_first_n_##SUF(p, n, static_cast<size_t>(select),  ord); \
+        else if (select < 0) sluice_top_n_##SUF(p, n, static_cast<size_t>(-select), ord); \
+        else                 sluice_sort_##SUF##_ordered(p, n, ord);            \
+    } while (0)
+
+SLUICE_API sluice_status sluice_sort(sluice_dtype type, void* data, size_t n,
+                                     ptrdiff_t select, const sluice_order* order,
+                                     int collect_stats, sluice_stats* stats) {
+    const sluice_order ord = order ? *order : SLUICE_ASCENDING;
+    if (data == nullptr && n > 0) return SLUICE_ERR_NULL;
+    if (collect_stats && stats == nullptr) return SLUICE_ERR_NULL;
+
+    if (!collect_stats) {
+        switch (type) {
+            case SLUICE_U32: SLUICE_FAST(u32, uint32_t); break;
+            case SLUICE_I32: SLUICE_FAST(i32, int32_t);  break;
+            case SLUICE_U64: SLUICE_FAST(u64, uint64_t); break;
+            case SLUICE_I64: SLUICE_FAST(i64, int64_t);  break;
+            case SLUICE_F32: SLUICE_FAST(f32, float);    break;
+            case SLUICE_F64: SLUICE_FAST(f64, double);   break;
+            default: return SLUICE_ERR_TYPE;
+        }
+        return SLUICE_OK;
+    }
+    switch (type) {
+        case SLUICE_U32: return sort_stats<uint32_t, uint32_t>(static_cast<uint32_t*>(data), n, select, ord, stats, Domain::Unsigned);
+        case SLUICE_I32: return sort_stats<int32_t,  uint32_t>(static_cast<int32_t*>(data),  n, select, ord, stats, Domain::Signed);
+        case SLUICE_U64: return sort_stats<uint64_t, uint64_t>(static_cast<uint64_t*>(data), n, select, ord, stats, Domain::Unsigned);
+        case SLUICE_I64: return sort_stats<int64_t,  uint64_t>(static_cast<int64_t*>(data),  n, select, ord, stats, Domain::Signed);
+        case SLUICE_F32: return sort_stats<float,    uint32_t>(static_cast<float*>(data),    n, select, ord, stats, Domain::Float);
+        case SLUICE_F64: return sort_stats<double,   uint64_t>(static_cast<double*>(data),   n, select, ord, stats, Domain::Float);
+        default: return SLUICE_ERR_TYPE;
+    }
+}
+#undef SLUICE_FAST
 
 SLUICE_API int sluice_is_sorted_u32(const uint32_t* data, size_t n) {
     for (size_t i = 1; i < n; ++i) if (data[i] < data[i - 1]) return 0;
