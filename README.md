@@ -1,10 +1,12 @@
 # Sluice
 
-An adaptive integer sorting engine. A sluice channels a mixed stream and
-separates it into graded outputs by routing it through the right screen — this
-engine does the same: it inspects the input and **dispatches to the fastest
-applicable method**, so it is never meaningfully slower than `std::sort` and
-often several times faster.
+**An adaptive integer sorting engine that routes every dataset through its
+fastest available sorting strategy.**
+
+Just as a sluice channels a mixed stream and separates it into graded outputs by
+routing it through the right screen, this engine inspects the input and
+**dispatches to the fastest applicable method** — so it is never meaningfully
+slower than `std::sort` and often several times faster.
 
 ```
 tiny arrays (n < 16)       -> insertion sort       (no setup cost)
