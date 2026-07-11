@@ -296,6 +296,115 @@ void low_cardinality(U* a, size_t n, U* vals, int m) {
     for (int d = 0; d < m; ++d) { U v = vals[d]; for (size_t c = cnt[d]; c > 0; --c) a[o++] = v; }
 }
 
+// --- heavy-hitter path (duplicate-heavy input with many unique outliers) ---
+// The low-cardinality path only fires when the WHOLE array has <= LOWCARD_MAX
+// distinct values. A dataset that is mostly a few very frequent values but also
+// carries thousands of unique outliers has high distinct count, so it falls to
+// radix and pays full width passes — even though a duplicate-aware sort (pdqsort)
+// finishes it in a fraction of the time by grouping the frequent values.
+//
+// This path recovers that: sample the array to find the few dominant values
+// ("heavy hitters"), partition every copy of them out (leaving a small residual
+// of outliers), radix-sort just the residual, then merge the sorted residual
+// with the value-sorted heavy runs. When a handful of values cover most of the
+// input, the residual is tiny and the width passes shrink with it.
+constexpr int    HH_MAX     = 32;        // max distinct heavy values tracked
+constexpr int    HH_TRIGGER = 4;         // ...but only take the path for <= this many
+constexpr size_t HH_MIN_N   = 1u << 16;  // only probe for large inputs
+constexpr int    HH_SAMPLE  = 2048;      // strided sample size for detection
+constexpr int    HH_COVER   = 90;        // trigger when heavies cover >= this % of the sample
+
+// Sample the array and return the count m (0..HH_MAX) of dominant values found,
+// writing them to hh_out ORDERED BY FREQUENCY DESCENDING (so the partition's
+// membership test hits the most common values first). Returns 0 when no small
+// set of values covers >= HH_COVER% of the sample (i.e. the heavy-hitter path
+// would not pay off), leaving the caller on the radix path.
+template <class U>
+int detect_heavy_hitters(const U* a, size_t n, U* hh_out) {
+    if (n < HH_MIN_N) return 0;
+    U samp[HH_SAMPLE];
+    size_t step = n / HH_SAMPLE; if (step == 0) step = 1;
+    int sn = 0;
+    for (size_t i = 0; sn < HH_SAMPLE && i < n; i += step) samp[sn++] = a[i];
+    std::sort(samp, samp + sn);
+    int thresh = sn / 128; if (thresh < 2) thresh = 2;      // ~0.8% of the sample
+    U    vals[HH_MAX]; int cnts[HH_MAX]; int m = 0;
+    for (int i = 0; i < sn; ) {
+        int j = i + 1; while (j < sn && samp[j] == samp[i]) ++j;
+        int c = j - i;
+        if (c >= thresh) {
+            if (m < HH_MAX) { vals[m] = samp[i]; cnts[m] = c; ++m; }
+            else {                                          // keep the HH_MAX largest
+                int mn = 0; for (int k = 1; k < m; ++k) if (cnts[k] < cnts[mn]) mn = k;
+                if (c > cnts[mn]) { vals[mn] = samp[i]; cnts[mn] = c; }
+            }
+        }
+        i = j;
+    }
+    if (m == 0) return 0;
+    for (int x = 0; x < m; ++x) {                           // order by frequency desc
+        int best = x; for (int y = x + 1; y < m; ++y) if (cnts[y] > cnts[best]) best = y;
+        std::swap(cnts[x], cnts[best]); std::swap(vals[x], vals[best]);
+    }
+    // Trigger only when a FEW dominant values already cover most of the sample —
+    // that is exactly the regime where radix loses to a duplicate-aware sort.
+    // With more spread-out duplication radix is already competitive, so bail.
+    int keep = m < HH_TRIGGER ? m : HH_TRIGGER, covered = 0;
+    for (int k = 0; k < keep; ++k) covered += cnts[k];
+    if (covered * 100 < sn * HH_COVER) return 0;
+    for (int k = 0; k < keep; ++k) hh_out[k] = vals[k];
+    return keep;
+}
+
+// Sort `a` given the m heavy values `hh` (frequency-ordered). Returns false on
+// allocation failure (caller then uses radix). On success sets *aux to the bytes
+// of auxiliary heap used. Correct for any input: values not equal to a heavy
+// value simply land in the residual, so the result is a full sort regardless of
+// how good the heavy-hitter guess was.
+template <class U>
+bool heavy_hitter_sort(U* a, size_t n, const U* hh, int m, size_t* aux) {
+    std::vector<U> res;                                    // reserve (no zero-init):
+    try { res.reserve(n); } catch (const std::bad_alloc&) { return false; }
+    // Partition, specialized and unrolled per m (<= HH_TRIGGER). Each heavy test
+    // is branchless (a 0/1 compare added into its counter); the ONLY branch is the
+    // rare "outlier" case, which is well predicted because we only get here when
+    // the heavies cover most of the input. A runtime-length loop here does not
+    // unroll and serialises on a cmov chain — measured 3-4x slower — so we spell
+    // the small cases out.
+    size_t cnt[HH_MAX] = {0};
+    U v0 = hh[0], v1 = m > 1 ? hh[1] : v0, v2 = m > 2 ? hh[2] : v0, v3 = m > 3 ? hh[3] : v0;
+    if (m == 1) {
+        for (size_t i = 0; i < n; ++i) { U x = a[i]; int h0 = (x == v0);
+            cnt[0] += h0; if (!h0) res.push_back(x); }
+    } else if (m == 2) {
+        for (size_t i = 0; i < n; ++i) { U x = a[i]; int h0 = (x == v0), h1 = (x == v1);
+            cnt[0] += h0; cnt[1] += h1; if (!(h0 | h1)) res.push_back(x); }
+    } else if (m == 3) {
+        for (size_t i = 0; i < n; ++i) { U x = a[i]; int h0 = (x == v0), h1 = (x == v1), h2 = (x == v2);
+            cnt[0] += h0; cnt[1] += h1; cnt[2] += h2; if (!(h0 | h1 | h2)) res.push_back(x); }
+    } else {
+        for (size_t i = 0; i < n; ++i) { U x = a[i];
+            int h0 = (x == v0), h1 = (x == v1), h2 = (x == v2), h3 = (x == v3);
+            cnt[0] += h0; cnt[1] += h1; cnt[2] += h2; cnt[3] += h3;
+            if (!(h0 | h1 | h2 | h3)) res.push_back(x); }
+    }
+    size_t r = res.size();
+    try { radix(res.data(), r); } catch (const std::bad_alloc&) { return false; }
+    U hv[HH_MAX]; size_t hc[HH_MAX];                        // (value,count), sort by value
+    for (int k = 0; k < m; ++k) { hv[k] = hh[k]; hc[k] = cnt[k]; }
+    for (int x = 1; x < m; ++x) { U vv = hv[x]; size_t cc = hc[x]; int j = x;
+        while (j > 0 && hv[j-1] > vv) { hv[j] = hv[j-1]; hc[j] = hc[j-1]; --j; } hv[j] = vv; hc[j] = cc; }
+    size_t i = 0, o = 0; int j = 0;                        // merge residual + heavy runs
+    while (i < r && j < m) {
+        if (res[i] < hv[j]) a[o++] = res[i++];
+        else { U v = hv[j]; for (size_t c = hc[j]; c > 0; --c) a[o++] = v; ++j; }
+    }
+    while (i < r)  a[o++] = res[i++];
+    while (j < m) { U v = hv[j]; for (size_t c = hc[j]; c > 0; --c) a[o++] = v; ++j; }
+    if (aux) *aux = (n + r) * sizeof(U);                    // residual buffer + radix temp
+    return true;
+}
+
 // --- the dispatcher -----------------------------------------------------
 // Optional out-parameter: when non-null, records which path actually ran, how
 // many radix passes, threads, and the auxiliary heap that path allocated (bytes,
@@ -382,6 +491,16 @@ void sluice_core(U* a, size_t n, core_path* path = nullptr, const Thresholds& th
             }
         }
         if (low) { low_cardinality(a, n, vals, m); note("low-cardinality", 0, 1, 0); return; }
+    }
+
+    // duplicate-heavy with outliers -> partition the dominant values out and
+    // radix only the small residual. Detection is a cheap sampled probe that
+    // finds nothing (and falls straight through) on high-cardinality input.
+    if (th.max_threads <= 1 || n < th.parallel_min) {   // sequential paths only
+        U hh[HH_MAX]; int m = detect_heavy_hitters(a, n, hh);
+        if (m > 0) { size_t aux = 0;
+            if (heavy_hitter_sort(a, n, hh, m, &aux)) { note("heavy-hitter", 0, 1, aux); return; }
+        }
     }
     // general integers -> radix; parallel MSD radix when configured and large.
     try {

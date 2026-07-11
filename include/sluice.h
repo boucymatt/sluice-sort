@@ -122,7 +122,7 @@ typedef enum {
 /* Profiling info, filled when collect_stats is nonzero. */
 typedef struct {
     const char* algorithm;      /* "insertion"|"interpolation"|"counting"|"low-cardinality"|
-                                 * "radix"|"already sorted"|"reverse"|"std::sort" */
+                                 * "heavy-hitter"|"radix"|"already sorted"|"reverse"|"std::sort" */
     double      time_ms;        /* wall time of the sort */
     size_t      memory_bytes;   /* auxiliary heap the chosen path used */
     int         passes;         /* radix passes (0 for other paths) */
