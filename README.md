@@ -3,7 +3,7 @@
 **An adaptive numeric sorting engine that routes every dataset through its
 fastest available sorting strategy.**
 
-*Version 0.4.1*
+*Version 0.8.0*
 
 Just as a sluice channels a mixed stream and separates it into graded outputs by
 routing it through the right screen, this engine inspects the input and
@@ -169,7 +169,8 @@ make            # static lib + shared lib + CLI executable
 make test       # run the correctness self-test
 make bench      # run the benchmark
 make sanitize   # build with ASan+UBSan (incl. float-cast-overflow), run self-test
-make strict     # compile under -Wall -Wextra -Wconversion -Wstrict-aliasing=2 -Werror
+make strict     # compile library + CLI + C++ header, warnings-as-errors
+make alloc-test # verify graceful degradation under allocation failure
 ```
 
 The self-test fuzzes against `std::sort` across every type (u32/i32/u64/i64,
@@ -492,6 +493,40 @@ int         sluice_is_sorted_u32(const uint32_t* data, size_t n);
 const char* sluice_version(void);
 ```
 
+## Compatibility & guarantees
+
+**Thread safety.** Every function is reentrant and holds no shared mutable
+state — no globals, no statics, no hidden caches. Concurrent calls are safe as
+long as they touch non-overlapping arrays (two threads writing the same buffer
+is a data race, exactly as with `memcpy`). `sluice_version()` returns a static
+string literal, safe to share. Setting `max_threads > 1` lets a *single* call
+use an internal pool for large radix sorts; that parallelism stays inside the
+call and doesn't weaken the reentrancy guarantee. The self-test runs clean under
+ThreadSanitizer.
+
+**Allocation failure.** The engine never aborts or leaks when memory runs out.
+Every heap-using path allocates inside a guard; on `std::bad_alloc` it retreats
+to the next cheaper path and, ultimately, to an in-place `std::sort` over the
+order-preserving key — which needs no heap and keeps a correct total order for
+every domain, including IEEE-754 NaNs. The array is always left fully sorted, no
+exception crosses the C ABI boundary, and `sluice_sort()` still returns
+`SLUICE_OK` (reporting `algorithm == "std::sort"`, `memory_bytes == 0` when the
+fallback ran). `make alloc-test` injects a failure into *every* allocation and
+verifies correct in-place sorting under ASan+UBSan.
+
+**C ABI compatibility policy.** The library uses semantic versioning. While the
+version is `0.x` the ABI is not yet frozen and may shift between minor releases.
+From `1.0.0` onward, within a major version:
+
+- exported function signatures do not change;
+- `sluice_status` / `sluice_dtype` / `sluice_order` values are stable — new
+  enumerators may be appended, existing ones keep their values;
+- new fields are only appended to the **end** of `sluice_config` / `sluice_stats`.
+  Zero-initialize these structs (`sluice_config c = {0};` or `sluice_config_init`)
+  so fields added later default to zero, which the library reads as "use default";
+- new functionality arrives as new functions, never by repurposing existing
+  ones. Breaking changes are reserved for a new major version.
+
 ## Layout
 
 ```
@@ -499,6 +534,7 @@ include/sluice.h   public C API (stable ABI, DLL export macros)
 include/sluice.hpp header-only C++ wrapper (type-safe, size-deduced)
 src/sluice.cpp     the engine (dispatcher + insertion/interpolation/counting/radix)
 src/cli.cpp        self-test + benchmark harness (the executable)
+tests/             standalone verification harnesses (e.g. allocation-failure)
 Makefile           cross-platform build
 docs/              benchmark charts
 ```

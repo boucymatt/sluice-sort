@@ -861,6 +861,6 @@ SLUICE_API int sluice_is_sorted_u32(const uint32_t* data, size_t n) {
     return 1;
 }
 
-SLUICE_API const char* sluice_version(void) { return "sluice 0.4.1"; }
+SLUICE_API const char* sluice_version(void) { return "sluice 0.8.0"; }
 
 }  // extern "C"

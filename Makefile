@@ -9,6 +9,9 @@
 #   make all-targets           build every target you have a toolchain for
 #   make test                  build + run the CLI self-test (native only)
 #   make bench                 build + run the benchmark      (native only)
+#   make sanitize              build + run self-test under ASan/UBSan
+#   make strict                compile library + CLI + C++ header, warnings-as-errors
+#   make alloc-test            verify graceful degradation under allocation failure
 #   make clean                 remove build/
 #
 # You can always force a compiler explicitly:  make TARGET=windows CXX=...
@@ -20,7 +23,7 @@
 # ============================================================================
 
 NAME    := sluice
-VERSION := 0.1.0
+VERSION := 0.8.0
 
 SRC_DIR := src
 INC_DIR := include
@@ -104,7 +107,7 @@ EXE        := $(BUILD)/$(NAME)$(EXE_EXT)
 
 AR ?= ar
 
-.PHONY: all static shared exe test bench sanitize strict clean all-targets info
+.PHONY: all static shared exe test bench sanitize strict alloc-test clean all-targets info
 all: static shared exe
 	@echo "==> $(TARGET): built static + shared + exe in $(BUILD)/  (CXX=$(CXX))"
 
@@ -148,15 +151,31 @@ sanitize:
 	  -fno-sanitize-recover=all -pthread -I$(INC_DIR) $(LIB_SRC) $(CLI_SRC) -o $(BUILD)/$(NAME)-san
 	@$(BUILD)/$(NAME)-san --test
 
-# Compile the library under strict warnings; fails the build on any warning.
+# Compile the whole project under strict warnings; fails the build on any
+# warning. Covers the library, the CLI, and the C++ header — nothing ships with
+# an implicit narrowing conversion or aliasing violation.
 strict:
 	@mkdir -p $(BUILD)
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wconversion -Wstrict-aliasing=2 -Werror -pthread \
 	  -I$(INC_DIR) -c $(LIB_SRC) -o $(BUILD)/sluice.strict.o
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wconversion -Wstrict-aliasing=2 -Werror -pthread \
+	  -I$(INC_DIR) -c $(CLI_SRC) -o $(BUILD)/cli.strict.o
 	@printf '#include "sluice.hpp"\nint main(){return 0;}\n' > $(BUILD)/hpp_check.cpp
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Wconversion -Wstrict-aliasing=2 -Werror -pthread \
 	  -I$(INC_DIR) -c $(BUILD)/hpp_check.cpp -o $(BUILD)/hpp_check.o
-	@echo "strict: no warnings (library + C++ header)"
+	@echo "strict: no warnings (library + CLI + C++ header)"
+
+# Verify graceful degradation under allocation failure: injects std::bad_alloc
+# into every heap allocation and checks the engine still sorts correctly in
+# place (see tests/alloc_fault.cpp). Runs the check under ASan+UBSan too, so a
+# leak or crash on the throw path fails the build.
+alloc-test:
+	@mkdir -p $(BUILD)
+	$(CXX) $(COMMON_CXXFLAGS) tests/alloc_fault.cpp $(LIB_SRC) -o $(BUILD)/alloc_fault
+	@$(BUILD)/alloc_fault
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+	  -pthread -I$(INC_DIR) tests/alloc_fault.cpp $(LIB_SRC) -o $(BUILD)/alloc_fault-san
+	@$(BUILD)/alloc_fault-san
 
 all-targets:
 	@for t in linux windows macos; do \

@@ -243,12 +243,12 @@ static bool self_test() {
         if (sluice_sort(SLUICE_U32, srt.data(), srt.size(), 0, nullptr, 1, &s, nullptr) != SLUICE_OK) { std::printf("  stats rc FAIL\n"); return false; }
         if (!s.already_sorted || std::strcmp(s.algorithm, "already sorted") != 0) { std::printf("  stats already_sorted FAIL\n"); return false; }
         // stats with duplicates + bounded range -> counting
-        std::vector<uint32_t> dup(50000); std::mt19937 r2(7); for (auto& x : dup) x = r2() % 100;
+        std::vector<uint32_t> dup(50000); std::mt19937 r2(7); for (auto& x : dup) x = static_cast<uint32_t>(r2() % 100);
         std::vector<uint32_t> dgold(dup); std::sort(dgold.begin(), dgold.end());
         sluice_sort(SLUICE_U32, dup.data(), dup.size(), 0, nullptr, 1, &s, nullptr);
         if (dup != dgold || s.duplicate_pct < 99.0 || std::strcmp(s.algorithm,"counting") != 0) { std::printf("  stats counting FAIL\n"); return false; }
         // error paths
-        if (sluice_sort(static_cast<sluice_dtype>(42), nullptr, 0, 0, nullptr, 0, nullptr, nullptr) != SLUICE_ERR_TYPE) { std::printf("  bad-type FAIL\n"); return false; }
+        if (sluice_sort(static_cast<sluice_dtype>(6), nullptr, 0, 0, nullptr, 0, nullptr, nullptr) != SLUICE_ERR_TYPE) { std::printf("  bad-type FAIL\n"); return false; }
         if (sluice_sort(SLUICE_U32, dup.data(), 1, 0, nullptr, 1, nullptr, nullptr) != SLUICE_ERR_NULL) { std::printf("  null-stats FAIL\n"); return false; }
     }
 
@@ -274,7 +274,7 @@ static bool self_test() {
         // custom thresholds must still sort correctly across sizes/types
         for (int t = 0; t < 200; ++t) {
             size_t n = r() % 3000;
-            std::vector<uint32_t> a(n); for (auto& x : a) x = r();
+            std::vector<uint32_t> a(n); for (auto& x : a) x = static_cast<uint32_t>(r());
             std::vector<uint32_t> g(a); std::sort(g.begin(), g.end());
             sluice_config cfg{};
             cfg.interpolation_limit = 768;   // raised past the default 512 (heap scratch)
@@ -284,7 +284,7 @@ static bool self_test() {
         }
         // a raised interpolation_limit should actually route n=700 to interpolation
         {
-            std::vector<uint32_t> a(700); for (auto& x : a) x = r();
+            std::vector<uint32_t> a(700); for (auto& x : a) x = static_cast<uint32_t>(r());
             sluice_config cfg{}; cfg.interpolation_limit = 1024;
             sluice_stats s;
             sluice_sort(SLUICE_U32, a.data(), a.size(), 0, nullptr, 1, &s, &cfg);
@@ -292,7 +292,7 @@ static bool self_test() {
         }
         // a zeroed-but-for-one-field config leaves other knobs at default
         {
-            std::vector<uint32_t> a(50000); std::mt19937 rr(5); for (auto& x : a) x = rr() % 5000;
+            std::vector<uint32_t> a(50000); std::mt19937 rr(5); for (auto& x : a) x = static_cast<uint32_t>(rr() % 5000);
             std::vector<uint32_t> g(a); std::sort(g.begin(), g.end());
             sluice_config cfg{}; cfg.counting_cap = 1u << 10;  // tiny cap -> forces radix
             sluice_stats s;

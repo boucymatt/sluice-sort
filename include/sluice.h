@@ -12,7 +12,10 @@
  *     tiny arrays (n<16)    -> insertion sort      (no setup cost)
  *     small arrays (n<=512) -> interpolation place  (branch-light; ~2-5x; skew-guarded)
  *     already sorted        -> return early         (detected in the scan pass)
+ *     descending run        -> reverse in place     (detected in the scan pass)
  *     bounded range         -> counting sort        (O(n), no comparisons)
+ *     few distinct values   -> low-cardinality tally (<=16 distinct, no heap)
+ *     dominant values+noise -> heavy-hitter partition (duplicate-heavy w/ outliers)
  *     everything else       -> LSD radix sort        (O(n·w), beats std::sort)
  *     allocation fails      -> std::sort             (in-place safety net)
  *
@@ -21,6 +24,48 @@
  *
  * This header exposes a stable C ABI so the shared library is callable from
  * C, C++, Python (ctypes/cffi), Rust, Go, etc.
+ *
+ * --------------------------------------------------------------------------
+ * Thread safety
+ * --------------------------------------------------------------------------
+ * Every function is reentrant and holds no shared mutable state — there are no
+ * globals, no statics, no hidden caches. Concurrent calls are safe as long as
+ * they operate on non-overlapping arrays; two threads sorting the same buffer
+ * is a data race, exactly as it would be for memcpy. sluice_version() returns a
+ * pointer to a string literal with static storage duration (safe to share).
+ * Passing max_threads > 1 in sluice_config lets a single call use an internal
+ * thread pool for large radix sorts; that parallelism is confined to the call
+ * and does not change the reentrancy guarantee above.
+ *
+ * --------------------------------------------------------------------------
+ * Behavior under allocation failure
+ * --------------------------------------------------------------------------
+ * The engine never aborts or leaks when the system is out of memory. Every
+ * heap-using path allocates inside a guard; on std::bad_alloc it retreats to
+ * the next cheaper path and, ultimately, to an in-place std::sort over the
+ * order-preserving key (which needs no heap and keeps a correct total order for
+ * every domain, including IEEE-754 NaNs). The array is always left fully
+ * sorted, no exception crosses the ABI boundary, and the status-returning
+ * sluice_sort() still reports SLUICE_OK (with stats.algorithm == "std::sort"
+ * and stats.memory_bytes == 0 when the fallback ran). Verified by
+ * tests/alloc_fault.cpp (make alloc-test), which injects failures into every
+ * allocation and checks the result under ASan+UBSan.
+ *
+ * --------------------------------------------------------------------------
+ * C ABI compatibility policy
+ * --------------------------------------------------------------------------
+ * The library uses semantic versioning (see sluice_version). While the version
+ * is 0.x the ABI is not yet frozen and may change between minor versions. From
+ * 1.0.0 onward the following are contractual within a major version:
+ *   - Existing exported function signatures do not change.
+ *   - sluice_status / sluice_dtype / sluice_order enumerator values are stable;
+ *     new enumerators may be appended but existing ones keep their values.
+ *   - New fields are only ever appended to the end of sluice_config and
+ *     sluice_stats. Callers must zero-initialize these structs (e.g.
+ *     `sluice_config c = {0};` or sluice_config_init) so that fields added
+ *     later default to zero; the library treats a zeroed field as "default".
+ *   - New functionality is added as new functions, not by repurposing existing
+ *     ones. Breaking changes are reserved for a new major version.
  * ==========================================================================*/
 #ifndef SLUICE_H
 #define SLUICE_H
@@ -174,7 +219,7 @@ SLUICE_API sluice_status sluice_sort(sluice_dtype type, void* data, size_t n,
  * Provided because "is it already sorted?" is a cheap, common query. */
 SLUICE_API int  sluice_is_sorted_u32(const uint32_t* data, size_t n);
 
-/* Library version, e.g. "sluice 0.4.1". */
+/* Library version, e.g. "sluice 0.8.0". */
 SLUICE_API const char* sluice_version(void);
 
 #ifdef __cplusplus
