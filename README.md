@@ -98,6 +98,33 @@ library's default portable `-O3` — so the comparison is apples-to-apples; an
 earlier version of this chart accidentally compiled the reference radix with
 `-march=native` and the library without, which exaggerated the gap.)
 
+### Against other state-of-the-art sorting libraries
+
+The comparison and textbook sorts above are the obvious baselines; the harder
+test is against modern high-performance sorting libraries. Run single-threaded
+and normalised to `std::sort` (= 1.0×, higher is faster), Sluice leads the field
+on this workload:
+
+![Sequential speed relative to std::sort across sorting libraries](docs/sequential-comparison.svg)
+
+| library       | speed vs `std::sort` | approach                                          |
+|---------------|---------------------:|---------------------------------------------------|
+| **Sluice**    | **1.58×**            | adaptive dispatch (this project)                  |
+| IPS4o         | 1.47×                | in-place parallel super-scalar samplesort (sequential mode) |
+| IPS2Ra        | 1.12×                | in-place parallel super-scalar radix sort (sequential mode) |
+| `std::sort`   | 1.00×                | libstdc++ introsort (baseline)                    |
+| Google VQSort | 0.85×                | Highway SIMD vectorised quicksort                 |
+
+IPS4o and IPS2Ra (Axtmann et al.) and Google's VQSort are heavily engineered for
+raw throughput; Sluice's edge here comes from routing fixed-width numeric keys to
+non-comparison methods (radix/counting) that sidestep the Ω(n·log n) barrier the
+vectorised comparison engines still pay. Two honest caveats: these are
+**single-threaded** numbers — Sluice also has an opt-in parallel radix path
+(`max_threads`, see [Parallel sorting](#parallel-sorting)) for large arrays, while
+IPS4o and IPS2Ra are built primarily to scale across many cores, so a
+multi-threaded comparison would look different — and, like every figure here, they
+reflect one workload on one machine (see [Scope & caveats](#scope--caveats)).
+
 ### Interpolation vs radix in the n ≤ 512 band
 
 The small-array band dispatches to interpolation rather than radix (the general-
