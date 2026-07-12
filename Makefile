@@ -12,6 +12,7 @@
 #   make sanitize              build + run self-test under ASan/UBSan
 #   make strict                compile library + CLI + C++ header, warnings-as-errors
 #   make alloc-test            verify graceful degradation under allocation failure
+#   make msd-test              fuzz the wide-key MSD radix path (seq + parallel)
 #   make clean                 remove build/
 #
 # You can always force a compiler explicitly:  make TARGET=windows CXX=...
@@ -107,7 +108,7 @@ EXE        := $(BUILD)/$(NAME)$(EXE_EXT)
 
 AR ?= ar
 
-.PHONY: all static shared exe test bench sanitize strict alloc-test clean all-targets info
+.PHONY: all static shared exe test bench sanitize strict alloc-test msd-test clean all-targets info
 all: static shared exe
 	@echo "==> $(TARGET): built static + shared + exe in $(BUILD)/  (CXX=$(CXX))"
 
@@ -176,6 +177,19 @@ alloc-test:
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
 	  -pthread -I$(INC_DIR) tests/alloc_fault.cpp $(LIB_SRC) -o $(BUILD)/alloc_fault-san
 	@$(BUILD)/alloc_fault-san
+
+# Fuzz the wide-key MSD radix path (u64/i64/f64), sequential and parallel,
+# against std::sort — natively, under ASan+UBSan, and under ThreadSanitizer.
+msd-test:
+	@mkdir -p $(BUILD)
+	$(CXX) $(COMMON_CXXFLAGS) tests/msd_fuzz.cpp $(LIB_SRC) -o $(BUILD)/msd_fuzz
+	@$(BUILD)/msd_fuzz
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+	  -pthread -I$(INC_DIR) tests/msd_fuzz.cpp $(LIB_SRC) -o $(BUILD)/msd_fuzz-asan
+	@$(BUILD)/msd_fuzz-asan
+	$(CXX) -std=c++17 -O1 -g -fsanitize=thread \
+	  -pthread -I$(INC_DIR) tests/msd_fuzz.cpp $(LIB_SRC) -o $(BUILD)/msd_fuzz-tsan
+	@$(BUILD)/msd_fuzz-tsan
 
 all-targets:
 	@for t in linux windows macos; do \

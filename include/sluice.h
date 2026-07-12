@@ -16,6 +16,7 @@
  *     bounded range         -> counting sort        (O(n), no comparisons)
  *     few distinct values   -> low-cardinality tally (<=16 distinct, no heap)
  *     dominant values+noise -> heavy-hitter partition (duplicate-heavy w/ outliers)
+ *     wide keys (64-bit)    -> MSD radix, early-exit  (stops when buckets split)
  *     everything else       -> LSD radix sort        (O(n·w), beats std::sort)
  *     allocation fails      -> std::sort             (in-place safety net)
  *

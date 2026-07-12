@@ -16,6 +16,7 @@ tiny arrays (n < 16)       -> insertion sort       (no setup cost)
 small arrays (n <= 512)    -> interpolation place   (Flashsort; skew-guarded)
 already sorted             -> return early          (detected in the scan pass)
 bounded range (<= 4n)      -> counting sort         (O(n), no comparisons)
+wide keys (64-bit)         -> MSD radix, early-exit  (stops when buckets split)
 everything else            -> LSD radix sort         (O(n·w), beats std::sort)
 allocation failure         -> std::sort             (in-place safety net)
 ```
@@ -101,9 +102,9 @@ earlier version of this chart accidentally compiled the reference radix with
 ### Against other state-of-the-art sorting libraries
 
 The comparison and textbook sorts above are the obvious baselines; the harder
-test is against modern high-performance sorting libraries. Run single-threaded
-and normalised to `std::sort` (= 1.0×, higher is faster), Sluice leads the field
-on this workload:
+test is against modern high-performance sorting libraries. Run single-threaded on
+an Apple Silicon M2 (arm64) and normalised to `std::sort` (= 1.0×, higher is
+faster), Sluice leads the field on this workload:
 
 ![Sequential speed relative to std::sort across sorting libraries](docs/sequential-comparison.svg)
 
@@ -163,8 +164,9 @@ crossover, beyond which radix wins and the dispatcher switches to it.
 - Not novel research: this is a well-engineered combination of established
   algorithms, dispatched adaptively — the same family as `boost::spreadsort`
   and `ska_sort`. The interpolation path is **Flashsort** (Neubert, 1998); the
-  bounded path is **counting sort** (Seward, 1954); the general path is **LSD
-  radix sort** (Hollerith-era). See [References](#references).
+  bounded path is **counting sort** (Seward, 1954); the general path is **radix
+  sort** — LSD for 32-bit keys, an early-terminating MSD for 64-bit so wide keys
+  don't pay double the passes (Hollerith-era). See [References](#references).
 
 ## References
 
@@ -177,8 +179,11 @@ The named algorithms Sluice dispatches to, and their sources:
   then repairs with insertion sort — exactly the interpolation path used here.
   <https://en.wikipedia.org/wiki/Flashsort>
 - **Bounded path — counting sort.** Harold H. Seward, 1954.
-- **General path — LSD radix sort.** Origins in Hollerith's tabulating
-  machines (1880s); see D. E. Knuth, *TAOCP* Vol. 3, "Sorting and Searching".
+- **General path — radix sort.** LSD for 32-bit keys; 64-bit keys use an
+  early-terminating MSD variant that stops once buckets separate, so wide keys
+  descend only ~log256(n) levels instead of paying a pass per byte. Origins in
+  Hollerith's tabulating machines (1880s); see D. E. Knuth, *TAOCP* Vol. 3,
+  "Sorting and Searching".
 - **Modern descendant (context).** Kristo et al., "The Case for a Learned
   Sorting Algorithm" (SIGMOD 2020) — replaces the linear interpolation with a
   learned model of the data distribution; same core idea as Flashsort.

@@ -199,13 +199,59 @@ void radix_lower(U* a, size_t n) {
     if (src != a) std::memcpy(a, src, n * sizeof(U));
 }
 
+// --- MSD radix, base 256, early termination (for wide keys) --------------
+// Most-significant-digit radix: partition by the top byte, then recurse into
+// each bucket on the next lower byte, stopping as soon as a bucket is small
+// enough to insertion-sort. Unlike LSD (which always makes sizeof(U) passes),
+// MSD descends only as far as it takes to separate the keys — about log256(n)
+// levels for well-spread data, independent of key width. That is what keeps
+// 64-bit throughput close to 32-bit instead of paying double the passes.
+// Each level uses the same tight counting scatter as the LSD radix above
+// (counting scatter, not an in-place permute, to stay branch-light). Result is
+// left in `a`; `buf` is scratch of length n.
+constexpr size_t MSD_BASE = 64;                 // buckets <= this: insertion sort
+template <class U>
+void msd_rec(U* a, U* buf, size_t n, int d) {
+    if (n <= MSD_BASE) { insertion(a, n); return; }  // small bucket
+    if (d < 0)         { return; }                    // keys equal in every byte
+    const int shift = d * 8;
+    size_t off[256] = {0};
+    for (size_t i = 0; i < n; ++i) ++off[(static_cast<uint64_t>(a[i]) >> shift) & 0xFFu];
+    size_t cnt[256], sum = 0;                    // keep counts; make exclusive offsets
+    for (int b = 0; b < 256; ++b) { cnt[b] = off[b]; size_t c = off[b]; off[b] = sum; sum += c; }
+    size_t cur[256]; std::memcpy(cur, off, sizeof(cur));
+    for (size_t i = 0; i < n; ++i) {             // counting scatter a -> buf by byte d
+        U x = a[i]; buf[cur[(static_cast<uint64_t>(x) >> shift) & 0xFFu]++] = x;
+    }
+    std::memcpy(a, buf, n * sizeof(U));          // bucketed data back into a
+    for (int b = 0; b < 256; ++b)                // recurse only where it can matter
+        if (cnt[b] > 1) msd_rec(a + off[b], buf + off[b], cnt[b], d - 1);
+}
+// Sort a[0..n) by bytes top_d..0 (top_d = sizeof(U)-1 for a full key). Allocates
+// one scratch buffer; bad_alloc propagates to the caller's std::sort fallback.
+template <class U>
+void msd_sort(U* a, size_t n, int top_d) {
+    if (n < 2) return;
+    std::vector<U> buf(n);                        // may throw bad_alloc -> caught upstream
+    msd_rec(a, buf.data(), n, top_d);
+}
+
+// Width-adaptive radix: wide keys (64-bit) take the early-terminating MSD path;
+// narrow keys stay on LSD, which is already faster for them (4 streaming passes,
+// no per-level copy-back).
+template <class U>
+void radix_adaptive(U* a, size_t n) {
+    if constexpr (sizeof(U) >= 8) msd_sort(a, n, static_cast<int>(sizeof(U)) - 1);
+    else                          radix(a, n);
+}
+
 // Parallel most-significant-digit radix. One pass partitions by the top byte
 // into 256 contiguous, independent buckets (concatenated in order they are
 // already globally sorted — no merge). Worker threads then finish each bucket
-// on its lower bytes via radix_lower, pulling buckets from a shared atomic
-// counter for dynamic load balancing (handles skew). Result is identical to the
-// sequential radix. Returns the number of worker threads used, or 0 on OOM
-// (caller then falls back to sequential radix).
+// on its lower bytes, pulling buckets from a shared atomic counter for dynamic
+// load balancing (handles skew). Result is identical to the sequential radix.
+// Returns the number of worker threads used, or 0 on OOM (caller then falls
+// back to sequential radix).
 template <class U>
 int parallel_radix(U* a, size_t n, int want_threads, size_t* aux_peak = nullptr) {
     constexpr int TOPSHIFT = (static_cast<int>(sizeof(U)) - 1) * 8;
@@ -255,7 +301,15 @@ int parallel_radix(U* a, size_t n, int want_threads, size_t* aux_peak = nullptr)
             int b = next_bucket.fetch_add(1, std::memory_order_relaxed);
             if (b >= 256) break;
             size_t start = off[b], len = off[b + 1] - off[b];
-            if (len > 1) radix_lower(buf.data() + start, len);
+            if (len > 1) {
+                // Top byte is already fixed within the bucket; finish the lower
+                // bytes. Wide keys use the early-terminating MSD (stops as soon
+                // as sub-buckets separate); narrow keys stay on LSD.
+                if constexpr (sizeof(U) >= 8)
+                    msd_sort(buf.data() + start, len, static_cast<int>(sizeof(U)) - 2);
+                else
+                    radix_lower(buf.data() + start, len);
+            }
         }
     };
     std::vector<std::thread> pool;
@@ -509,7 +563,7 @@ void sluice_core(U* a, size_t n, core_path* path = nullptr, const Thresholds& th
             int used = parallel_radix(a, n, th.max_threads, &paux);
             if (used > 0) { note("radix", static_cast<int>(sizeof(U)), used, paux); return; }
         }
-        radix(a, n); note("radix", static_cast<int>(sizeof(U)), 1, n * sizeof(U)); return;
+        radix_adaptive(a, n); note("radix", static_cast<int>(sizeof(U)), 1, n * sizeof(U)); return;
     } catch (const std::bad_alloc&) { std::sort(a, a + n); note("std::sort", 0, 1, 0); }
 }
 
