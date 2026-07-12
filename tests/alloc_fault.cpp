@@ -21,6 +21,16 @@ static bool   g_arm    = false;
 static size_t g_thresh = 0;               // while armed, allocations > this fail
 static long   g_fails  = 0;               // how many injected failures fired
 
+// These replacement hooks bridge operator new -> malloc and operator delete ->
+// free so we can inject failures into the library's allocations. GCC's new/delete
+// pairing then reports a (false-positive) -Wmismatched-new-delete at -O3 when it
+// correlates the malloc'd storage with the free in a destructor. Suppress that
+// one diagnostic at the definition site; guarded to GCC since the warning name
+// is GCC-specific (naming it under Clang would itself warn).
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
 void* operator new(std::size_t s) {
     if (g_arm && s > g_thresh) { ++g_fails; throw std::bad_alloc(); }
     void* p = std::malloc(s ? s : 1); if (!p) throw std::bad_alloc(); return p;
@@ -30,6 +40,9 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
 
 static int g_bad = 0, g_stdsort = 0;
 template <class T>
@@ -59,8 +72,11 @@ static void check(const char* tag, sluice_dtype dt, std::vector<T> in, size_t th
 
 int main() {
     std::mt19937_64 rng(99);
-    auto u32 = [&](size_t n, uint32_t mod){ std::vector<uint32_t> v(n);
-        for (auto& x : v) x = mod ? (uint32_t)(rng() % mod) : (uint32_t)rng(); return v; };
+    auto u32 = [&](size_t n, uint32_t mod){
+        std::vector<uint32_t> v(n);
+        for (auto& x : v) x = mod ? (uint32_t)(rng() % mod) : (uint32_t)rng();
+        return v;
+    };
     // thresh=0 -> every heap allocation fails (keys buffer fails first);
     // thresh=1<<15 -> small allocations pass, large buffers fail (fall-through).
     for (size_t thresh : {size_t(0), size_t(1u << 15)}) {
@@ -73,7 +89,8 @@ int main() {
         { std::vector<int64_t> v(200000); for (auto& x : v) x = (int64_t)rng();
           check("i64 uniform", SLUICE_I64, v, thresh); }
         { std::vector<double> v(200000); std::uniform_real_distribution<double> d(-1e9,1e9);
-          for (auto& x : v) x = d(rng); check("f64 uniform", SLUICE_F64, v, thresh); }
+          for (auto& x : v) x = d(rng);
+          check("f64 uniform", SLUICE_F64, v, thresh); }
         // duplicate-heavy (heavy-hitter path) and bounded (counting path)
         { std::vector<uint32_t> v(200000); uint32_t h = (uint32_t)rng();
           for (auto& x : v) x = (rng()%100<97)? h : (uint32_t)rng();
