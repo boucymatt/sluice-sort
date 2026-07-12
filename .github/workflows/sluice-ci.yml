@@ -59,6 +59,56 @@ jobs:
           path: build/linux/
           if-no-files-found: error
 
+  linux-arm:
+    name: Linux arm64 (${{ matrix.compiler }})
+    # Native aarch64 GitHub-hosted runner (no emulation). These labels are free
+    # for public repositories and also available in private repositories.
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            sudo apt-get install -y g++ make
+            echo "CXX=g++" >> "$GITHUB_ENV"
+          else
+            sudo apt-get install -y clang make
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          fi
+
+      - name: Show toolchain
+        run: |
+          "$CXX" --version
+          uname -m
+          make --version
+
+      # TARGET stays 'linux': the Makefile's linux target uses the native
+      # compiler, which on an arm64 runner produces aarch64 binaries.
+      - name: Build
+        run: make clean all TARGET=linux CXX="$CXX"
+
+      - name: Run self-test
+        run: make test TARGET=linux CXX="$CXX"
+
+      - name: Strict warning check
+        run: make strict TARGET=linux CXX="$CXX"
+
+      - name: Upload Linux arm64 artifacts
+        if: matrix.compiler == 'gcc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sluice-linux-arm64
+          path: build/linux/
+          if-no-files-found: error
+
   sanitizers:
     name: Linux sanitizers
     runs-on: ubuntu-latest
